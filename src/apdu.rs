@@ -1,5 +1,5 @@
 // src/apdu.rs
-use pcsc::{Card, Disposition, Protocols, ShareMode};
+use pcsc::Card;
 
 // Load Authentication Keys into Reader Memory (Location 0x00 or 0x20)
 // ACR122U standard: FF 82 00 key_num 06 [KEY]

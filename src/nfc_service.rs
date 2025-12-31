@@ -5,7 +5,7 @@ use pcsc::{Context, PNP_NOTIFICATION, Protocols, ReaderState, Scope, ShareMode, 
 use std::ffi::{CStr, CString};
 use std::time::Duration;
 
-use crate::types::{CARD_TYPE_MIFARE_1K, CARD_TYPE_NTAG, NfcCommand, OutgoingMessage};
+use crate::types::{CARD_TYPE_MIFARE_1K, NfcCommand, OutgoingMessage};
 use crate::{cards, ndef};
 
 pub fn run(tx: Sender<OutgoingMessage>, rx: Receiver<NfcCommand>) {
