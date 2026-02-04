@@ -136,3 +136,43 @@ pub fn write_ntag(card: &Card, data: &[u8]) -> Result<(), String> {
     }
     Ok(())
 }
+
+pub fn read_ntag_v2(card: &Card) -> Result<Vec<u8>, String> {
+    // 1. Read the first NDEF page (usually Page 4) to find the length
+    let initial_data = apdu::read_binary(card, 4, 16)
+        .map_err(|e| format!("Failed to read start of NDEF: {}", e))?;
+
+    if initial_data[0] != 0x03 {
+        return Err("No NDEF container found (Tag 0x03 missing)".into());
+    }
+
+    // 2. Determine Length (Handle 1-byte or 3-byte length)
+    let (ndef_len, header_offset) = if initial_data[1] == 0xFF {
+        let len = ((initial_data[2] as usize) << 8) | (initial_data[3] as usize);
+        (len, 4) // 3-byte length starts at index 4
+    } else {
+        (initial_data[1] as usize, 2) // 1-byte length starts at index 2
+    };
+
+    println!("NDEF Message Length: {} bytes", ndef_len);
+
+    // 3. Read the rest of the data based on ndef_len
+    // (You already have some in initial_data, but for simplicity,
+    // we can read the full range and slice it)
+    let mut full_data = Vec::new();
+    let total_pages_to_read = (ndef_len + header_offset + 3) / 4; // round up to pages
+
+    for block in 4..(4 + total_pages_to_read) {
+        match apdu::read_binary(card, block as u8, 4) {
+            Ok(data) => full_data.extend(data),
+            Err(_) => break,
+        }
+    }
+
+    // 4. Return only the NDEF payload (stripping TLV header)
+    if full_data.len() >= (header_offset + ndef_len) {
+        Ok(full_data[header_offset..(header_offset + ndef_len)].to_vec())
+    } else {
+        Err("Incomplete read: card ended before NDEF length reached".into())
+    }
+}

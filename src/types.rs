@@ -14,6 +14,28 @@ pub enum OutgoingMessage {
     READER_ERROR { error: String },
 }
 
+#[derive(Deserialize, Debug)]
+#[serde(tag = "type")]
+pub enum NDEFType {
+    TEXT,
+    URL,
+    APP,
+}
+
+#[derive(Debug)]
+pub struct NdefRecord {
+    pub tnf: u8, // Type Name Format (How to interpret the type)
+    pub record_type: Vec<u8>,
+    pub payload: Vec<u8>,
+    pub id: Option<Vec<u8>>,
+}
+
+#[derive(Debug)]
+pub struct NdefPayload {
+    pub data_type: NDEFType,
+    pub content: String,
+}
+
 // Messages received FROM the WebSocket client
 #[derive(Deserialize, Debug)]
 #[serde(tag = "type")]
