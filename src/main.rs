@@ -13,9 +13,6 @@ async fn main() {
     env_logger::init();
     println!("Starting NFC Rust Service...");
 
-    nfc_service::nfc_service_cli();
-    return;
-
     // Channel: WS -> NFC (Commands)
     // We use Crossbeam (Sync) because NFC thread is blocking
     let (cmd_tx, cmd_rx) = unbounded::<types::NfcCommand>();

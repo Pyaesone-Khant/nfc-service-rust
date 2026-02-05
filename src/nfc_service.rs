@@ -32,7 +32,7 @@ impl ServiceState {
 }
 
 pub fn run(tx: Sender<OutgoingMessage>, rx: Receiver<NfcCommand>) {
-    info!("Starting NFC Service (Auto-Restart + Deduplication)...");
+    println!("Starting NFC Service (Auto-Restart + Deduplication)...");
 
     // cache persists outside the recovery loop so we don't spam "Reader Connected" on every restart
     let mut state_cache = ServiceState::new();
@@ -40,11 +40,11 @@ pub fn run(tx: Sender<OutgoingMessage>, rx: Receiver<NfcCommand>) {
     // --- OUTER RECOVERY LOOP ---
     // If PC/SC crashes, we break the inner loop and come back here to re-establish the context.
     loop {
-        info!("Attempting to establish PC/SC Context...");
+        println!("Attempting to establish PC/SC Context...");
 
         let ctx = match Context::establish(Scope::User) {
             Ok(ctx) => {
-                info!("PC/SC Context established successfully.");
+                println!("PC/SC Context established successfully.");
                 ctx
             }
             Err(err) => {
@@ -79,7 +79,7 @@ pub fn run(tx: Sender<OutgoingMessage>, rx: Receiver<NfcCommand>) {
         if is_connected {
             state_cache.reader_connected = true;
             let _ = tx.send(OutgoingMessage::READER_STATUS { success: true });
-            info!("Initial Reader Found: {:?}", reader_names);
+            println!("Initial Reader Found: {:?}", reader_names);
         } else {
             // If we restart and no reader is there, update cache
             state_cache.reader_connected = false;
@@ -109,9 +109,10 @@ pub fn run(tx: Sender<OutgoingMessage>, rx: Receiver<NfcCommand>) {
             // 3. PROCESS COMMANDS
             while let Ok(cmd) = rx.try_recv() {
                 match cmd {
-                    NfcCommand::Write { user_id } => {
-                        println!("Received Write Command for content: {}", user_id);
-                        handle_write_command(&ctx, &reader_names, &user_id, &tx);
+                    NfcCommand::Write { payloads } => {
+                        let vec_payload: Vec<NdefPayload> =
+                            serde_json::from_str(&payloads).unwrap();
+                        handle_write_command_v2(&ctx, &reader_names, vec_payload, &tx);
                     }
                     NfcCommand::CheckReaderStatus => {
                         // We use the cached state because if the context is dead,
@@ -131,7 +132,7 @@ pub fn run(tx: Sender<OutgoingMessage>, rx: Receiver<NfcCommand>) {
                 // Acknowledge change
                 reader_states[0].sync_current_state();
 
-                info!("Hardware change detected, refreshing list...");
+                println!("Hardware change detected, refreshing list...");
                 update_reader_list(
                     &ctx,
                     &mut reader_names,
@@ -171,7 +172,7 @@ pub fn run(tx: Sender<OutgoingMessage>, rx: Receiver<NfcCommand>) {
 
                     // CASE A: Card Inserted
                     if is_present && !was_present {
-                        info!("Card Inserted on {:?}", name);
+                        println!("Card Inserted on {:?}", name);
                         // DEDUPLICATION: Only read if we didn't think a card was there
                         if !state_cache.card_present {
                             state_cache.card_present = true;
@@ -181,7 +182,7 @@ pub fn run(tx: Sender<OutgoingMessage>, rx: Receiver<NfcCommand>) {
 
                     // CASE B: Card Removed
                     if !is_present && was_present {
-                        info!("Card Removed from {:?}", name);
+                        println!("Card Removed from {:?}", name);
                         if state_cache.card_present {
                             state_cache.card_present = false;
                             state_cache.last_data_read = None; // Reset data cache so we can read same card again
@@ -200,7 +201,7 @@ pub fn run(tx: Sender<OutgoingMessage>, rx: Receiver<NfcCommand>) {
         state_cache.reader_connected = false;
         state_cache.card_present = false;
 
-        info!("Service loop exited. restarting in 1 second...");
+        println!("Service loop exited. restarting in 1 second...");
         std::thread::sleep(Duration::from_secs(1));
     } // End Outer Loop
 }
@@ -357,6 +358,34 @@ fn handle_write_command(
     }
 }
 
+fn handle_write_command_v2(
+    ctx: &Context,
+    reader_names: &[CString],
+    payloads: Vec<NdefPayload>,
+    tx: &Sender<OutgoingMessage>,
+) {
+    let mut success = false;
+    match write_nfc_data_cli(&ctx, &reader_names, payloads) {
+        Ok(_) => {
+            println!("Data written successfully to card.");
+            let _ = tx.send(OutgoingMessage::DATA_WRITE_SUCCESS {
+                message: "Data Written Successfully!".into(),
+            });
+            success = true;
+        }
+        Err(e) => {
+            println!("Failed to write data to card: {}", e);
+            let _ = tx.send(OutgoingMessage::DATA_WRITE_ERROR { error: e });
+            success = true;
+        }
+    }
+
+    if !success {
+        let _ = tx.send(OutgoingMessage::DATA_WRITE_ERROR {
+            error: "No card found on reader".into(),
+        });
+    }
+}
 enum Operation {
     Read,
     Write,

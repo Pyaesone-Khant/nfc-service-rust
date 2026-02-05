@@ -14,11 +14,14 @@ pub enum OutgoingMessage {
     READER_ERROR { error: String },
 }
 
-#[derive(Deserialize, Debug)]
-#[serde(tag = "type")]
+#[derive(Deserialize, Debug, PartialEq, Clone, Copy)]
 pub enum NDEFType {
+    #[serde(rename = "TEXT")]
+    // to match payload data from Frontend eg: {type = "TEXT"} from Frontend
     TEXT,
+    #[serde(rename = "URL")]
     URL,
+    #[serde(rename = "APP")]
     APP,
 }
 
@@ -30,7 +33,7 @@ pub struct NdefRecord {
     pub id: Option<Vec<u8>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize)]
 pub struct NdefPayload {
     pub data_type: NDEFType,
     pub content: String,
@@ -41,13 +44,13 @@ pub struct NdefPayload {
 #[serde(tag = "type")]
 pub enum IncomingMessage {
     GET_READER_STATUS,
-    WRITE_DATA { data_type: String, user_id: String },
+    WRITE_DATA { payloads: String },
 }
 
 // Internal commands sent from WS Server -> NFC Thread
 #[derive(Debug)]
 pub enum NfcCommand {
-    Write { user_id: String },
+    Write { payloads: String },
     CheckReaderStatus,
 }
 
