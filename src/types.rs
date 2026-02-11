@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 pub enum OutgoingMessage {
     READER_STATUS { success: bool },
     CARD_STATUS { success: bool, message: String },
-    DATA_READ_SUCCESS { data: String },
+    DATA_READ_SUCCESS { data: Vec<NdefRecordResponse> },
     DATA_READ_ERROR { error: String },
     DATA_WRITE_SUCCESS { message: String },
     DATA_WRITE_ERROR { error: String },
@@ -31,6 +31,13 @@ pub struct NdefRecord {
     pub record_type: Vec<u8>,
     pub payload: Vec<u8>,
     pub id: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NdefRecordResponse {
+    pub record_id: usize,
+    pub record_type: String,
+    pub payload: String,
 }
 
 #[derive(Debug, Deserialize)]

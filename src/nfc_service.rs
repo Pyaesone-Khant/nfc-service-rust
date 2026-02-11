@@ -1,6 +1,6 @@
 // src/nfc_service.rs
 use crossbeam_channel::{Receiver, Sender};
-use log::{error, info};
+use log::error;
 use pcsc::{Context, Error, PNP_NOTIFICATION, Protocols, ReaderState, Scope, ShareMode, State};
 use std::io;
 use std::{
@@ -10,7 +10,8 @@ use std::{
 };
 
 use crate::types::{
-    CARD_TYPE_MIFARE_1K, NDEFType, NdefPayload, NdefRecord, NfcCommand, OutgoingMessage,
+    CARD_TYPE_MIFARE_1K, CARD_TYPE_NTAG, NDEFType, NdefPayload, NdefRecordResponse, NfcCommand,
+    OutgoingMessage,
 };
 use crate::{cards, ndef};
 
@@ -32,7 +33,7 @@ impl ServiceState {
 }
 
 pub fn run(tx: Sender<OutgoingMessage>, rx: Receiver<NfcCommand>) {
-    println!("Starting NFC Service (Auto-Restart + Deduplication)...");
+    // println!("Starting NFC Service (Auto-Restart + Deduplication)...");
 
     // cache persists outside the recovery loop so we don't spam "Reader Connected" on every restart
     let mut state_cache = ServiceState::new();
@@ -40,11 +41,11 @@ pub fn run(tx: Sender<OutgoingMessage>, rx: Receiver<NfcCommand>) {
     // --- OUTER RECOVERY LOOP ---
     // If PC/SC crashes, we break the inner loop and come back here to re-establish the context.
     loop {
-        println!("Attempting to establish PC/SC Context...");
+        // println!("Attempting to establish PC/SC Context...");
 
         let ctx = match Context::establish(Scope::User) {
             Ok(ctx) => {
-                println!("PC/SC Context established successfully.");
+                // println!("PC/SC Context established successfully.");
                 ctx
             }
             Err(err) => {
@@ -79,7 +80,7 @@ pub fn run(tx: Sender<OutgoingMessage>, rx: Receiver<NfcCommand>) {
         if is_connected {
             state_cache.reader_connected = true;
             let _ = tx.send(OutgoingMessage::READER_STATUS { success: true });
-            println!("Initial Reader Found: {:?}", reader_names);
+            // println!("Initial Reader Found: {:?}", reader_names);
         } else {
             // If we restart and no reader is there, update cache
             state_cache.reader_connected = false;
@@ -132,7 +133,6 @@ pub fn run(tx: Sender<OutgoingMessage>, rx: Receiver<NfcCommand>) {
                 // Acknowledge change
                 reader_states[0].sync_current_state();
 
-                println!("Hardware change detected, refreshing list...");
                 update_reader_list(
                     &ctx,
                     &mut reader_names,
@@ -172,7 +172,6 @@ pub fn run(tx: Sender<OutgoingMessage>, rx: Receiver<NfcCommand>) {
 
                     // CASE A: Card Inserted
                     if is_present && !was_present {
-                        println!("Card Inserted on {:?}", name);
                         // DEDUPLICATION: Only read if we didn't think a card was there
                         if !state_cache.card_present {
                             state_cache.card_present = true;
@@ -182,7 +181,6 @@ pub fn run(tx: Sender<OutgoingMessage>, rx: Receiver<NfcCommand>) {
 
                     // CASE B: Card Removed
                     if !is_present && was_present {
-                        println!("Card Removed from {:?}", name);
                         if state_cache.card_present {
                             state_cache.card_present = false;
                             state_cache.last_data_read = None; // Reset data cache so we can read same card again
@@ -201,7 +199,6 @@ pub fn run(tx: Sender<OutgoingMessage>, rx: Receiver<NfcCommand>) {
         state_cache.reader_connected = false;
         state_cache.card_present = false;
 
-        println!("Service loop exited. restarting in 1 second...");
         std::thread::sleep(Duration::from_secs(1));
     } // End Outer Loop
 }
@@ -260,20 +257,58 @@ fn handle_card_insertion(
                 Err(_) => "unknown".into(),
             };
 
-            let data_res = if card_type == CARD_TYPE_MIFARE_1K {
-                cards::read_mifare(&card)
+            let data_res = if card_type == CARD_TYPE_NTAG {
+                cards::read_ntag_v2(&card)
             } else {
-                cards::read_ntag(&card)
+                match cards::read_mifare(&card) {
+                    Ok(raw_bytes) => {
+                        if let Some(start_pos) = raw_bytes.iter().position(|&b| b == 0x03) {
+                            let ndef_start = start_pos + 2;
+
+                            // 1. Find the Terminator (0xFE) to get the ACTUAL end of data
+                            let terminator_pos = raw_bytes
+                                .iter()
+                                .skip(ndef_start)
+                                .position(|&b| b == 0xFE)
+                                .map(|p| p + ndef_start)
+                                .unwrap_or(raw_bytes.len());
+
+                            // 2. Slice strictly between the Length byte and the Terminator
+                            // This ignores whatever the 'Length byte' claimed if it was wrong
+                            let ndef_data = raw_bytes[ndef_start..terminator_pos].to_vec();
+
+                            Ok(ndef_data)
+                        } else {
+                            Err("No NDEF TLV (0x03) found on Mifare card".into())
+                        }
+                    }
+                    Err(e) => Err(format!("Mifare read failed: {}", e)),
+                }
             };
 
             match data_res {
-                Ok(raw) => match ndef::decode_ndef_text(&raw) {
-                    Ok(text) => {
-                        // DEDUPLICATION: Only send data if it changed
-                        if cache.last_data_read.as_ref() != Some(&text) {
-                            cache.last_data_read = Some(text.clone());
-                            let _ = tx.send(OutgoingMessage::DATA_READ_SUCCESS { data: text });
+                Ok(raw) => match ndef::parse_ndef_records(&raw) {
+                    Ok(records) => {
+                        let mut response_data: Vec<NdefRecordResponse> = Vec::new();
+
+                        for (i, rec) in records.iter().enumerate() {
+                            let type_str = String::from_utf8_lossy(&rec.record_type).to_string();
+                            let payload_str = String::from_utf8_lossy(&rec.payload)
+                                .trim_matches(char::from(0))
+                                .to_string();
+
+                            let item = NdefRecordResponse {
+                                record_id: (i + 1),
+                                record_type: type_str,
+                                payload: payload_str,
+                            };
+
+                            response_data.push(item);
                         }
+
+                        let _ = tx.send(OutgoingMessage::DATA_READ_SUCCESS {
+                            data: response_data,
+                        });
                     }
                     Err(_) => {
                         // Optional: Deduplicate error messages too if desired
@@ -297,15 +332,12 @@ fn handle_write_command(
     content: &str,
     tx: &Sender<OutgoingMessage>,
 ) {
-    println!("Starting write process for content: {}", content);
     if reader_names.is_empty() {
         let _ = tx.send(OutgoingMessage::DATA_WRITE_ERROR {
             error: "No reader connected".into(),
         });
         return;
     }
-
-    println!("Attempting to write to card on available readers...");
 
     let mut success = false;
     for name in reader_names {
@@ -335,14 +367,12 @@ fn handle_write_command(
 
             match write_res {
                 Ok(_) => {
-                    println!("Data written successfully to card.");
                     let _ = tx.send(OutgoingMessage::DATA_WRITE_SUCCESS {
                         message: "Data Written Successfully!".into(),
                     });
                     success = true;
                 }
                 Err(e) => {
-                    println!("Failed to write data to card: {}", e);
                     let _ = tx.send(OutgoingMessage::DATA_WRITE_ERROR { error: e });
                     success = true;
                 }
@@ -367,14 +397,12 @@ fn handle_write_command_v2(
     let mut success = false;
     match write_nfc_data_cli(&ctx, &reader_names, payloads) {
         Ok(_) => {
-            println!("Data written successfully to card.");
             let _ = tx.send(OutgoingMessage::DATA_WRITE_SUCCESS {
                 message: "Data Written Successfully!".into(),
             });
             success = true;
         }
         Err(e) => {
-            println!("Failed to write data to card: {}", e);
             let _ = tx.send(OutgoingMessage::DATA_WRITE_ERROR { error: e });
             success = true;
         }
