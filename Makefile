@@ -12,7 +12,11 @@ clean: ## Clean the project using cargo
 	cargo clean
 
 build: ## Build the project using cargo
-	cargo build
+	cargo build --release
+
+build-win: ## Build the project for Window target using mingw-w64
+	@rustup target add x86_64-pc-windows-gnu
+	cargo build --target=x86_64-pc-windows-gnu --release
 
 lint: ## Lint the project using cargo
 	@rustup component add clippy 2> /dev/null
