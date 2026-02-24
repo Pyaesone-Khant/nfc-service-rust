@@ -2,6 +2,7 @@
 use crossbeam_channel::{Receiver, Sender};
 use log::error;
 use pcsc::{Context, Error, PNP_NOTIFICATION, Protocols, ReaderState, Scope, ShareMode, State};
+use std::collections::HashSet;
 use std::io;
 use std::{
     ffi::{CStr, CString},
@@ -33,19 +34,21 @@ impl ServiceState {
 }
 
 pub fn run(tx: Sender<OutgoingMessage>, rx: Receiver<NfcCommand>) {
-    // println!("Starting NFC Service (Auto-Restart + Deduplication)...");
+    println!("Starting NFC Service (Auto-Restart + Deduplication)...");
 
     // cache persists outside the recovery loop so we don't spam "Reader Connected" on every restart
     let mut state_cache = ServiceState::new();
 
+    let mut last_poll = std::time::Instant::now();
+
     // --- OUTER RECOVERY LOOP ---
     // If PC/SC crashes, we break the inner loop and come back here to re-establish the context.
     loop {
-        // println!("Attempting to establish PC/SC Context...");
+        println!("Attempting to establish PC/SC Context...");
 
         let ctx = match Context::establish(Scope::User) {
             Ok(ctx) => {
-                // println!("PC/SC Context established successfully.");
+                println!("PC/SC Context established successfully.");
                 ctx
             }
             Err(err) => {
@@ -80,13 +83,12 @@ pub fn run(tx: Sender<OutgoingMessage>, rx: Receiver<NfcCommand>) {
         if is_connected {
             state_cache.reader_connected = true;
             let _ = tx.send(OutgoingMessage::READER_STATUS { success: true });
-            // println!("Initial Reader Found: {:?}", reader_names);
+            println!("Initial Reader Found: {:?}", reader_names);
         } else {
             // If we restart and no reader is there, update cache
             state_cache.reader_connected = false;
         }
 
-        // --- INNER PROCESSING LOOP ---
         loop {
             // 2. Wait for State Change
             // We use a timeout to allow checking for WebSocket commands periodically
@@ -97,11 +99,11 @@ pub fn run(tx: Sender<OutgoingMessage>, rx: Receiver<NfcCommand>) {
                         // Normal behavior, just continue
                     }
                     Error::ServiceStopped | Error::NoService => {
-                        error!("CRITICAL PCSC ERROR: {}. Restarting service...", err);
+                        eprintln!("CRITICAL PCSC ERROR: {}. Restarting service...", err);
                         break; // BREAK INNER LOOP -> Triggers Outer Loop Recovery
                     }
                     _ => {
-                        error!("PCSC Error: {}. Retrying...", err);
+                        eprintln!("PCSC Error: {}. Retrying...", err);
                         std::thread::sleep(Duration::from_millis(100));
                     }
                 }
@@ -125,12 +127,20 @@ pub fn run(tx: Sender<OutgoingMessage>, rx: Receiver<NfcCommand>) {
                 }
             }
 
-            // 4. PROCESS PnP EVENTS (Hardware Changes)
-            // Check if PnP (Index 0) changed
+            //4. PROCESS PnP EVENTS (Hardware Changes) | check if the reader list should be updated or not
+            let mut needs_update = false;
             if !reader_states.is_empty()
                 && reader_states[0].event_state().intersects(State::CHANGED)
             {
-                // Acknowledge change
+                needs_update = true;
+            }
+
+            if last_poll.elapsed() > Duration::from_secs(2) {
+                needs_update = true;
+                last_poll = std::time::Instant::now();
+            }
+
+            if needs_update {
                 reader_states[0].sync_current_state();
 
                 update_reader_list(
@@ -172,15 +182,17 @@ pub fn run(tx: Sender<OutgoingMessage>, rx: Receiver<NfcCommand>) {
 
                     // CASE A: Card Inserted
                     if is_present && !was_present {
+                        println!("Card Inserted on {:?}", name);
                         // DEDUPLICATION: Only read if we didn't think a card was there
                         if !state_cache.card_present {
                             state_cache.card_present = true;
-                            handle_card_insertion(&ctx, &name, &tx, &mut state_cache);
+                            handle_card_insertion(&ctx, &name, &tx);
                         }
                     }
 
                     // CASE B: Card Removed
                     if !is_present && was_present {
+                        println!("Card Removed from {:?}", name);
                         if state_cache.card_present {
                             state_cache.card_present = false;
                             state_cache.last_data_read = None; // Reset data cache so we can read same card again
@@ -205,37 +217,55 @@ pub fn run(tx: Sender<OutgoingMessage>, rx: Receiver<NfcCommand>) {
 
 // --- HELPER FUNCTIONS ---
 
-fn update_reader_list(
+pub fn update_reader_list(
     ctx: &Context,
     reader_names: &mut Vec<CString>,
     reader_states: &mut Vec<ReaderState>,
     buf: &mut [u8],
 ) {
-    match ctx.list_readers(buf) {
-        Ok(iter) => {
-            *reader_names = iter.map(|name| CString::from(name)).collect();
+    // 1. Get the raw list of reader names from PCSC
+    let new_names_cstr: Vec<CString> = match ctx.list_readers(buf) {
+        Ok(iter) => iter.map(|name| CString::from(name)).collect(),
+        Err(_) => Vec::new(),
+    };
 
-            // Reset states, keeping PnP at index 0
-            reader_states.truncate(1);
+    // 2. Identify current readers (skipping index 0 which is PnP)
+    let current_names: HashSet<CString> = reader_names.iter().cloned().collect();
+    let new_names_set: HashSet<CString> = new_names_cstr.iter().cloned().collect();
 
-            for name in reader_names.iter() {
-                // Add new readers with UNAWARE state to force a check next loop
-                reader_states.push(ReaderState::new(name.clone(), State::UNAWARE));
+    // 3. REMOVE disconnected readers
+    // We filter `reader_names` and `reader_states` (keeping index 0 of states safe)
+    if reader_states.len() > 1 {
+        let mut i = 1;
+        while i < reader_states.len() {
+            // Because reader_names is 0-indexed relative to readers (no PnP),
+            // and reader_states is 1-indexed (has PnP at 0),
+            // reader_states[i] corresponds to reader_names[i-1].
+            let name = &reader_names[i - 1];
+
+            if !new_names_set.contains(name) {
+                println!("Removing reader: {:?}", name);
+                reader_states.remove(i);
+                reader_names.remove(i - 1);
+                // Don't increment 'i' because the next element shifted down
+            } else {
+                i += 1;
             }
         }
-        Err(_) => {
-            reader_names.clear();
-            reader_states.truncate(1);
+    }
+
+    // 4. ADD new readers
+    for name in new_names_cstr {
+        if !current_names.contains(&name) {
+            println!("Adding new reader: {:?}", name);
+            reader_names.push(name.clone());
+            // Add as UNAWARE so the next loop checks it
+            reader_states.push(ReaderState::new(name, State::UNAWARE));
         }
     }
 }
 
-fn handle_card_insertion(
-    ctx: &Context,
-    reader_name: &CStr,
-    tx: &Sender<OutgoingMessage>,
-    cache: &mut ServiceState,
-) {
+fn handle_card_insertion(ctx: &Context, reader_name: &CStr, tx: &Sender<OutgoingMessage>) {
     let _ = tx.send(OutgoingMessage::CARD_STATUS {
         success: true,
         message: "Card detected!".into(),
@@ -323,68 +353,6 @@ fn handle_card_insertion(
             }
         }
         Err(e) => error!("Failed to connect to card: {}", e),
-    }
-}
-
-fn handle_write_command(
-    ctx: &Context,
-    reader_names: &[CString],
-    content: &str,
-    tx: &Sender<OutgoingMessage>,
-) {
-    if reader_names.is_empty() {
-        let _ = tx.send(OutgoingMessage::DATA_WRITE_ERROR {
-            error: "No reader connected".into(),
-        });
-        return;
-    }
-
-    let mut success = false;
-    for name in reader_names {
-        if let Ok(card) = ctx.connect(name, ShareMode::Shared, Protocols::ANY) {
-            let mut names_buf = [0u8; 128];
-            let mut atr_buf = [0u8; 64];
-            let card_type = match card.status2(&mut names_buf, &mut atr_buf) {
-                Ok(status) => {
-                    let atr = status.atr();
-                    if let Some(last) = atr.last() {
-                        format!("{:x}", last)
-                    } else {
-                        "unknown".into()
-                    }
-                }
-                Err(_) => continue,
-            };
-
-            let ndef_msg = ndef::encode_ndef_message(content);
-            let tlv_data = ndef::wrap_in_tlv(&ndef_msg);
-
-            let write_res = if card_type == CARD_TYPE_MIFARE_1K {
-                cards::write_mifare(&card, &tlv_data)
-            } else {
-                cards::write_ntag(&card, &tlv_data)
-            };
-
-            match write_res {
-                Ok(_) => {
-                    let _ = tx.send(OutgoingMessage::DATA_WRITE_SUCCESS {
-                        message: "Data Written Successfully!".into(),
-                    });
-                    success = true;
-                }
-                Err(e) => {
-                    let _ = tx.send(OutgoingMessage::DATA_WRITE_ERROR { error: e });
-                    success = true;
-                }
-            }
-            break;
-        }
-    }
-
-    if !success {
-        let _ = tx.send(OutgoingMessage::DATA_WRITE_ERROR {
-            error: "No card found on reader".into(),
-        });
     }
 }
 
