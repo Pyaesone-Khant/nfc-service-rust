@@ -1,8 +1,8 @@
-# NFC Service Rust (`feat/nfc-ws-v2`)
+# NFC Service Rust
 
 Rust NFC service for reading and writing **multiple NDEF records** on MIFARE and NTAG cards, exposed through a WebSocket server.
 
-This README is based on commits in this branch (`main..feat/nfc-ws-v2`).
+This README is based on commits in the branch (`main..feat/nfc-ws-v2`).
 
 ## Branch Commit History
 
