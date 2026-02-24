@@ -73,8 +73,10 @@ async fn handle_connection(
                             IncomingMessage::GET_READER_STATUS => {
                                 let _ = nfc_cmd_tx.send(NfcCommand::CheckReaderStatus);
                             }
-                            IncomingMessage::WRITE_DATA { user_id, .. } => {
-                                let _ = nfc_cmd_tx.send(NfcCommand::Write { user_id });
+                            IncomingMessage::WRITE_DATA { payloads } => {
+                                println!("incoming data; {:?}", payloads);
+
+                                let _ = nfc_cmd_tx.send(NfcCommand::Write { payloads });
                             }
                         }
                     }

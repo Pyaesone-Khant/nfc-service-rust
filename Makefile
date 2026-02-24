@@ -1,0 +1,27 @@
+SHELL := /bin/bash
+.PHONY: help
+
+help:
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-15s\033[0m %s\n", $$1, $$2}'
+
+run: ## Run the project using Cargo Watch to detect changes and run immediately
+	cargo watch -x run
+
+
+clean: ## Clean the project using cargo
+	cargo clean
+
+build: ## Build the project using cargo
+	cargo build --release
+
+build-win: ## Build the project for Window target using mingw-w64
+	@rustup target add x86_64-pc-windows-gnu
+	cargo build --target=x86_64-pc-windows-gnu --release
+
+lint: ## Lint the project using cargo
+	@rustup component add clippy 2> /dev/null
+	cargo clippy
+
+fmt: ## Format the project using cargo
+	@rustup component add rustfmt 2> /dev/null
+	cargo fmt
